@@ -1074,7 +1074,7 @@ func (r *ExtractFunc) Assigned(stmt ast.Stmt, info *loader.PackageInfo) []*types
 	idntsAssign := make(map[*ast.Ident]struct{})
 	switch stmt := stmt.(type) {
 	case *ast.AssignStmt: // for statements with '='
-		if stmt.Tok != token.DEFINE || stmt.Tok != token.AND_ASSIGN {
+		if stmt.Tok != token.DEFINE {
 			for _, x := range stmt.Lhs {
 				indExp := false
 				switch x.(type) {
@@ -1129,7 +1129,7 @@ func (r *ExtractFunc) Defined(stmt ast.Stmt, info *loader.PackageInfo) []*types.
 			return true
 		})
 	case *ast.AssignStmt: // :=, &= are the only operators that define
-		if stmt.Tok == token.DEFINE || stmt.Tok == token.AND_ASSIGN {
+		if stmt.Tok == token.DEFINE {
 			for _, x := range stmt.Lhs {
 				indExp := false
 				switch x.(type) {
