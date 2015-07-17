@@ -11,9 +11,8 @@ package refactoring
 import (
 	"go/ast"
 	"regexp"
-
+	// "fmt"
 	"github.com/godoctor/godoctor/text"
-
 	"github.com/godoctor/godoctor/internal/golang.org/x/tools/astutil"
 )
 
@@ -53,14 +52,12 @@ func (r *ExtractLocal) Run(config *Config) *Result {
 		r.Log.AssociatePos(r.SelectionStart, r.SelectionEnd)
 		return &r.Result
 	}
-	// get second variable to choose whether single extraction
-	// or multiple extraction
 	r.sChoice(config)
 	r.selectionCheck()
 	// get third variable that will be the
 	// new variable to replace the expression
 	r.varName = config.Args[0].(string)
-	r.singleExtract()
+	r.singleExtract(r.SelectedNode)
 	r.FormatFileInEditor()
 	r.UpdateLog(config, false)
 	return &r.Result
@@ -86,154 +83,109 @@ func (r *ExtractLocal) selectionCheck() *Result {
 	return &r.Result
 }
 
+
 // singleExtract locates the position of the selection and will
 // replace it with a new variable of the user's chosing
-func (r *ExtractLocal) singleExtract() {
+func (r *ExtractLocal) singleExtract(sel ast.Node) {
 	var switchList, typeSwitchFound []ast.Stmt
-	var plists, rlists, recLists []*ast.Field
-	var lhs, rhs []ast.Expr
-	var parentNode, switchNode, fini, fcond, fpost, ifInitAssign, ifElse, condition, assign ast.Node
-	found, isBranchStmt, isLabelStmt := false, false, false
-	errorType := ""
+	var lhs []ast.Expr
+	var switchNode, ifInitAssign, condition, assign ast.Node
+	found:= false
 	ast.Inspect(r.File, func(n ast.Node) bool {
 		switch selectedNode := n.(type) {
-		case *ast.FuncDecl:
-			if selectedNode.Type.Params != nil {
-				plists = selectedNode.Type.Params.List
-			}
-			if selectedNode.Type.Results != nil {
-				rlists = selectedNode.Type.Results.List
-			}
-			if selectedNode.Recv != nil {
-				recLists = selectedNode.Recv.List
-			}
 		case ast.Stmt:
-			parentNode = selectedNode
-			if sNode, ok := selectedNode.(*ast.SwitchStmt); ok {
-				switchNode = sNode
-				switchList = sNode.Body.List
-			} else if ifNode, ok := selectedNode.(*ast.IfStmt); ok {
-				if assignNode, ok := ifNode.Init.(*ast.AssignStmt); ok {
+			switch node := selectedNode.(type){
+			case *ast.SwitchStmt:
+				switchNode = node
+				switchList = node.Body.List
+			case *ast.IfStmt:
+				if assignNode, ok := node.Init.(*ast.AssignStmt); ok { // check if the if statement has a assignment statement in its init list
 					ifInitAssign = assignNode
-				} else if ifNode.Else != nil {
-					ifElse = ifNode.Else
 				}
-			} else if fNode, ok := selectedNode.(*ast.ForStmt); ok {
-				fini = fNode.Init
-				fcond = fNode.Cond
-				fpost = fNode.Post
-				isForCond := r.forCheck()
-				if isForCond {
+			case *ast.ForStmt:
+				if r.forCheck() {
 					found = true
-					errorType = "for"
+					r.Log.Error("You can't extract from a for loop's conditions (any part in the for statement).")
 				}
-			} else if typeSwitch, ok := selectedNode.(*ast.TypeSwitchStmt); ok {
-				body := typeSwitch.Body.List
-				if len(body) != 0 {
-					typeSwitchFound = body
+			case *ast.TypeSwitchStmt:
+				if len(node.Body.List) != 0 {
+					typeSwitchFound = node.Body.List
 				}
-				if typeSwitch.Init != nil {
-					condition = typeSwitch.Init
-				} else if typeSwitch.Assign != nil {
-					assign = typeSwitch.Assign
+				if node.Init != nil {
+					condition = node.Init
+				} else if node.Assign != nil {
+					assign = node.Assign
 				}
-			} else if assignment, ok := selectedNode.(*ast.AssignStmt); ok {
-				lhs, rhs = assignment.Lhs, assignment.Rhs
-			} else if block, ok := selectedNode.(*ast.BlockStmt); ok {
-				if block == r.SelectedNode {
-					errorType = "blockSelected"
+			case *ast.AssignStmt:
+				lhs = node.Lhs
+			case *ast.BlockStmt:
+				if _, ok := r.SelectedNode.(*ast.BlockStmt);ok{
+					r.Log.Error("You can't select a block for extract local. Please use the extract refactoring when selecting blocks or functions.")
 					found = true
 				}
-			} else if branch, ok := selectedNode.(*ast.BranchStmt); ok {
-				if branch == r.SelectedNode || branch.Label == r.SelectedNode || r.posLine(branch) == r.posLine(r.SelectedNode) {
-					isBranchStmt = true
+			case *ast.BranchStmt:
+				if _ , ok := r.SelectedNode.(*ast.BranchStmt); ok {
+					r.Log.Error("Sorry, you can't extract a goto, break, continue, or fallthrough statement")
+					found = true
 				}
-			} else if label, ok := selectedNode.(*ast.LabeledStmt); ok {
-				if label == r.SelectedNode {
-					isLabelStmt = true
+			case *ast.LabeledStmt:
+				if _, ok := r.SelectedNode.(*ast.LabeledStmt); ok {
+					r.Log.Error("You can't create a variable for a Label.")
+					found = true
 				}
 			}
 		case ast.Expr:
-			multiAssignVar := r.multiAssignVarCheck(lhs, rhs)
-			isVarStmt := r.varStmtCheck()
-			isLhsAssignVar := r.lhsAssignVarCheck()
-			isCallExpr := r.callCheck(selectedNode)
-			isSelectorType := r.selectorCheck(selectedNode)
-			isNil := r.checkNil(selectedNode)
-			isKeyValueExpr := r.keyValueCheck()
-			isCompositeLit := r.checkComposite()
-			isIdentInAssign := r.checkAssignIdents()
-			funcInput := r.funcInputCheck(plists, rlists, recLists)
-			// might not need this one, will have to wait till after
-			isSwitchCaseSelector := r.caseSelectorCheck(switchList)
-			if multiAssignVar { // check if selected node is from part a _, _ := _, _ stmt
-				errorType = "mulitAssign"
+			if r.multiAssignVarCheck(lhs) { // check if selected node is from part a _, _ := _, _ stmt
+				r.Log.Error("You can't extract from a multi-assign statement (ie: a, b := 0, 0).")
 				found = true
-			} else if r.isPreDeclaredIdent() {
-				errorType = "preIdent"
+			} else if r.isPreDeclaredIdent() { // check if the word extracted is a reserved word
+				r.Log.Error("Sorry, you can't pull out a predetermined identifier like string or reflect "+
+				"and make a variable of that type (reflect.String can't be made newVar.String since it isn't type reflect)")
 				found = true
-			} else if isVarStmt { // checks if its a var _ _ stmt
-				errorType = "assignStmt"
+			} else if r.varStmtCheck() { // Checks if the extracted statement is a variable declaration i.e, var i int
+				r.Log.Error("Extracting from a var stmt will alter the definition and should be avoided.")
 				found = true
-			} else if isLhsAssignVar { // checks if its from the lhs of assign stmt
-				errorType = "lhsAssign"
+			} else if r.lhsAssignVarCheck() { // checks if its from the lhs of assign stmt
+				r.Log.Error("You can't extract a variable from the lhs of an assignment statement.")				
 				found = true
-			} else if isCallExpr { // checks if it's in call expr
-				errorType = "callExpr"
+			} else if r.callCheck(selectedNode) { // checks if it's in call expr
+				r.Log.Error("You can't extract this part of a 'call expr' (ie:  fmt.Println('____') can't extract the fmt or Println, or fmt.Println).")
 				found = true
-			} else if funcInput { // check if selected node is from the function definition
-				errorType = "funcInput"
+			} else if r.funcInputCheck() { // check if selected node is from the function definition
+				r.Log.Error("You can't extract from the function parameters/results/method input at the function definition or the whole "+
+				"function itself (for full function extraction use the extract refactoring).")
 				found = true
-			} else if isSelectorType { // check for when a selector type
-				errorType = "selectorType"
+			} else if r.selectorCheck(selectedNode) { // check for when a selector type
+				r.Log.Error("You can't extract the type from a selector expr (ie: case reflect.Float32:  can't extract Float32).")
 				found = true
-			} else if isSwitchCaseSelector { // checks if its from the switch type (ie switch node, checks if its node)
-				errorType = "switchKey"
+			} else if r.caseSelectorCheck(switchList) { // checks if its from the switch type (ie switch node, checks if its node)
+				r.Log.Error("Sorry, you can't extract the switch key or the case selector.")
 				found = true
-			} else if isNil { // checks if it's nil
-				errorType = "nil"
+			} else if r.checkNil(selectedNode) { // checks if it's nil
+				r.Log.Error("You can't extract nil since nil isn't a type.")				
 				found = true
-			} else if isKeyValueExpr { // check to see if from a key:value
-				errorType = "keyValue"
+			} else if r.keyValueCheck() { // check to see if from a key:value
+				r.Log.Error("You can't extract the whole key/value from a key value expression (ie: key: value can't be newVar := key: value).")
 				found = true
-			} else if isCompositeLit {
-				errorType = "blockSelected"
+			} else if r.checkComposite() {
+				r.Log.Error("You can't select a block for extract local. Please use the extract refactoring when selecting blocks or functions.")
 				found = true
-			} else if isBranchStmt {
-				errorType = "branchStmt"
-				found = true
-			} else if isLabelStmt {
-				errorType = "labelStmt"
-				found = true
-			} else if isIdentInAssign {
+			} else if r.checkAssignIdents() {
 				newVar := r.createVar(r.SelectedNode)
 				found = r.createParent(newVar)
 			} else if selectedNode == r.SelectedNode {
-				typeCase := r.typeSwitchCheck(typeSwitchFound, condition, assign)
-				isIfMult := r.ifMultLeftCheck(ifInitAssign, selectedNode)
-				isSwitchCase := r.switchCheck(switchList, selectedNode)
-				line1 := r.endLine(selectedNode)
-				line2 := r.endLine(r.SelectedNode)
-				//isIndexExpr := r.checkIndexExpr(selectedNode)
-				if isSwitchCase { // check for switch stmts
+				if r.switchCheck(switchList, selectedNode) { // check for switch stmts
 					newVar := r.createVar(selectedNode)
 					found = r.addForSwitch(switchNode, selectedNode, newVar)
-				} else if typeCase { // check if selected node is from part of the type switch
-					errorType = "typeSwitchCase"
+				} else if r.typeSwitchCheck(typeSwitchFound, condition, assign){ // check if selected node is from part of the type switch
+					r.Log.Error("You can't extract a type variable from a type switch statement or it's case statements.")
 					found = true
-				} else if isIfMult { // check for for loops or if mutli assign
+				} else if r.ifMultLeftCheck(ifInitAssign, selectedNode) { // check for for loops or if mutli assign
 					found = true
-					errorType = "ifMulti"
-				} else if line1 == line2 || ifElse != nil {
-					newVar := r.createVar(selectedNode)
-					found = r.createParent(newVar)
-				} /* else if isStarExpr { // checks if it's a star expr
-						errorType = "starExpr"
-						found = true
-					} else if isIndexExpr {
-					errorType = "indexExpr"
-					found = true
-				} */
+					r.Log.Error("You can't extract from an if statement with an assign stmt in it")
+				} else {
+					found = r.createParent(r.createVar(selectedNode))
+				}
 			}
 		default:
 		}
@@ -244,8 +196,20 @@ func (r *ExtractLocal) singleExtract() {
 		return false
 
 	})
-	r.errorCheck(errorType)
 }
+
+
+// multiAssignVarCheck checks if it's a multi assign stmt ie  _, _ := _, _
+// and returns true if the selected node is on either side
+func (r *ExtractLocal) multiAssignVarCheck(lhs []ast.Expr) bool {
+	// if len(lhs) > 1 && r.posLine(lhs[0]) == r.posLine(r.SelectedNode) {
+	if (len(lhs)>1) && r.posLine(lhs[0]) == r.posLine(r.SelectedNode){
+		r.Log.Error("You can't extract from a multi-assign statement (ie: a, b := 0, 0).")
+	}
+	return false
+}
+
+
 func (r *ExtractLocal) posOff(node ast.Node) int {
 	return r.Program.Fset.Position(node.Pos()).Offset
 }
@@ -262,22 +226,24 @@ func (r *ExtractLocal) posLine(node ast.Node) int {
 // switchCheck switch case check for switch version of extraction
 func (r *ExtractLocal) switchCheck(switchList []ast.Stmt, selectedNode ast.Node) bool {
 	for index, _ := range switchList {
-		line1 := r.posLine(switchList[index])
-		line2 := r.posLine(selectedNode)
+		line1 := r.Program.Fset.Position(switchList[index].Pos()).Line
+		line2 := r.Program.Fset.Position(selectedNode.Pos()).Line
 		if line1 == line2 {
 			return true
 		}
 	}
+
+
+
 	return false
 }
 
 // forCheck for loop init/cond/post test
-func (r *ExtractLocal) forCheck() bool {
-	off1 := r.posLine(r.SelectedNode)
+func (r *ExtractLocal) forCheck() bool { // check if the immediate parent is a for loop, if so, then return true - fails the for loop extraction
 	enclosing, _ := astutil.PathEnclosingInterval(r.File, r.SelectedNode.Pos(), r.SelectedNode.End())
 	for _, index2 := range enclosing {
 		if forparent, ok := index2.(*ast.ForStmt); ok {
-			if r.posLine(forparent) == off1 {
+			if r.posLine(forparent) == r.posLine(r.SelectedNode) {
 				return true
 			}
 		}
@@ -287,10 +253,8 @@ func (r *ExtractLocal) forCheck() bool {
 
 // ifMultLeftCheck if stmt check for _, _ conditions on the left
 func (r *ExtractLocal) ifMultLeftCheck(ifInitAssign ast.Node, selectedNode ast.Node) bool {
-	if ifInitAssign != nil {
-		line1 := r.posLine(ifInitAssign)
-		line2 := r.posLine(selectedNode)
-		if line1 == line2 {
+		if ifInitAssign != nil {
+		if r.Program.Fset.Position(ifInitAssign.Pos()).Line == r.Program.Fset.Position(r.SelectedNode.Pos()).Line {
 			return true
 		}
 	}
@@ -299,17 +263,14 @@ func (r *ExtractLocal) ifMultLeftCheck(ifInitAssign ast.Node, selectedNode ast.N
 
 // typeSwitchCheck sees if the switch is a type switch and if so returns true to produce an error
 func (r *ExtractLocal) typeSwitchCheck(typeSwitchFound []ast.Stmt, condition ast.Node, assign ast.Node) bool {
+	enclosing, _ := astutil.PathEnclosingInterval(r.File, r.SelectedNode.Pos(), r.SelectedNode.End())
 	if len(typeSwitchFound) != 0 {
 		for _, index := range typeSwitchFound {
 			if caseClauses, ok := index.(*ast.CaseClause); ok {
 				for _, index2 := range caseClauses.List {
-					if index2 == r.SelectedNode {
-						return true
-					}
-					enclosing, _ := astutil.PathEnclosingInterval(r.File, r.SelectedNode.Pos(), r.SelectedNode.End())
 					for _, index3 := range enclosing {
 						if index3 == index2 {
-							return true
+						r.Log.Error("You can't extract a type variable from a type switch statement or it's case statements.")
 						}
 					}
 				}
@@ -332,64 +293,18 @@ func (r *ExtractLocal) typeSwitchCheck(typeSwitchFound []ast.Stmt, condition ast
 
 // funcInputCheck checks to see if selected node is a function parameter or result
 // in the definition and returns true if it is so as to produce an error
-func (r *ExtractLocal) funcInputCheck(plists []*ast.Field, rlists []*ast.Field, recLists []*ast.Field) bool {
-	if len(plists) != 0 {
-		for _, index := range plists {
-			for _, name := range index.Names {
-				if name == r.SelectedNode {
-					return true
-				}
-			}
-		}
-	}
-	if len(rlists) != 0 {
-		for _, index := range rlists {
-			if r.posLine(index) == r.posLine(r.SelectedNode) {
-				return true
-			}
-		}
-	}
-	if len(recLists) != 0 {
-		for _, index := range recLists {
-			if r.posLine(index) == r.posLine(r.SelectedNode) {
-				return true
-			} /*else if index == r.SelectedNode {
-				fmt.Printf("goes here")
-				return true
-			}
-			for _, names := range index.Names {
-				if names == r.SelectedNode {
-					fmt.Printf("goes here")
-					return true
-				}
-			}*/
-		}
-	}
-	return false
-}
-
-// multiAssignVarCheck checks if it's a multi assign stmt ie  _, _ := _, _
-// and returns true if the selected node is on either side
-func (r *ExtractLocal) multiAssignVarCheck(lhs []ast.Expr, rhs []ast.Expr) bool {
-	if len(lhs) > 1 && r.posLine(lhs[0]) == r.posLine(r.SelectedNode) {
+func (r *ExtractLocal) funcInputCheck() bool {
+	path, _ := astutil.PathEnclosingInterval(r.File, r.SelectedNode.Pos(), r.SelectedNode.End())
+	if _,ok := r.SelectedNode.(*ast.FieldList);ok{
+		return true
+	}else if _,ok := path[1].(*ast.Field);ok{
+		return true
+	}else if _,ok := path[0].(*ast.Field);ok{
 		return true
 	}
 	return false
 }
 
-/*// ifFmtWBinary checks if the if stmt has mulitple conditions/inital conditions
-// ie if x := a.Type(); x != y {
-// TODO: might not need, check all 400 tests to see
-func (r *ExtractLocal) ifFmtWBinary(parentNode ast.Node, childNode ast.Node, selectedNode ast.Node) bool {
-	if parentNode != nil && childNode != nil {
-		line1 := r.posLine(childNode)
-		line2 := r.posLine(selectedNode)
-		if line1 == line2 {
-			return true
-		}
-	}
-	return false
-} */
 
 // keyValueCheck checks if is a key value expr or a child of
 // a key value expr, so anything to do maps, or keys : values
@@ -419,9 +334,9 @@ func (r *ExtractLocal) lhsAssignVarCheck() bool {
 	for _, index := range enclosing {
 		if assign, ok := index.(*ast.AssignStmt); ok {
 			for _, index2 := range assign.Lhs {
-				if _, ok := index2.(*ast.SelectorExpr); ok {
-					return true
-				}
+				// if _, ok := index2.(*ast.SelectorExpr); ok {
+				// 	return true
+				// }
 				if index2 == r.SelectedNode {
 					return true
 				}
@@ -435,48 +350,21 @@ func (r *ExtractLocal) lhsAssignVarCheck() bool {
 // a call expr itself, or if part of the callexpr (although
 // inside the () of it should work)
 func (r *ExtractLocal) callCheck(selectedNode ast.Node) bool {
-	/*if call, ok := selectedNode.(*ast.CallExpr); ok {
-		if call == r.SelectedNode {
-			return true
-		} else if fun, ok := call.Fun.(*ast.SelectorExpr); ok {
-			if fun == r.SelectedNode || fun.X == r.SelectedNode || fun.Sel == r.SelectedNode {
-				return true
-			}
-		} else if len(call.Args) != 0 {
-			for _, index := range call.Args {
-				if selector, ok := index.(*ast.SelectorExpr); ok {
-					if selector == r.SelectedNode || selector.X == r.SelectedNode || selector.Sel == r.SelectedNode {
-						return true
-					}
-				} else if ident, ok := index.(*ast.Ident); ok {
-					if ident == r.SelectedNode {
-						return false
-					}
-				}
-			}
-		} else {
-			enclosing, _ := astutil.PathEnclosingInterval(r.File, r.SelectedNode.Pos(), r.SelectedNode.End())
-			if enclosing[1] != nil {
-				if _, ok := enclosing[1].(*ast.ExprStmt); ok {
-					return true
-				}
-			}
-		}
-	} */
 	enclosing, _ := astutil.PathEnclosingInterval(r.File, r.SelectedNode.Pos(), r.SelectedNode.End())
 	for _, index := range enclosing {
 		if call, ok := index.(*ast.CallExpr); ok {
 			for _, index2 := range call.Args {
-				if index2 == r.SelectedNode {
+				if index2 == r.SelectedNode { // as in fmt.Println(a+b); a+b can be extracted into a new variable
 					return false
-				} else if _, ok := index2.(*ast.BinaryExpr); ok {
+				} else if _, ok := index2.(*ast.BinaryExpr); ok { // as in fmt.Println(a+b+c); a+b+c can be extracted into a new variable
 					return false
 				}
 			}
-		}
-		if _, ok := index.(*ast.CallExpr); ok {
 			return true
 		}
+		// if _, ok := index.(*ast.CallExpr); ok {
+		// 	return true
+		// }
 	}
 	return false
 }
@@ -484,7 +372,7 @@ func (r *ExtractLocal) callCheck(selectedNode ast.Node) bool {
 // selectorCheck this will check the selector expr and see if the
 // sel part (which is the type) is the r.SelectedNode
 func (r *ExtractLocal) selectorCheck(selectedNode ast.Node) bool {
-	if selector, ok := selectedNode.(*ast.SelectorExpr); ok {
+	if  selector,ok := selectedNode.(*ast.SelectorExpr);ok{
 		if selector.Sel == r.SelectedNode {
 			return true
 		}
@@ -514,58 +402,15 @@ func (r *ExtractLocal) checkComposite() bool {
 	return false
 }
 
-/*// checkIndexExpr checks to see if it's an index expr
-func (r *ExtractLocal) checkIndexExpr(selectedNode ast.Node) bool {
-	enclosing, _ := astutil.PathEnclosingInterval(r.File, selectedNode.Pos(), selectedNode.End())
-	for _, index := range enclosing {
-		if indexExpr, ok := index.(*ast.IndexExpr); ok {
-			if indexExpr.X == r.SelectedNode || indexExpr.Index == r.SelectedNode {
-				return true
-			}
-		}
-	}
-	return false
-}*/
-
 // checkAssignIdents checks to see if an ident obj is inside an assign, which would be
 // allowed to be extracted
 func (r *ExtractLocal) checkAssignIdents() bool {
-	/*if ident, ok := r.SelectedNode.(*ast.BasicLit); ok {
-		enclosing, _ := astutil.PathEnclosingInterval(r.File, ident.Pos(), ident.End())
-		for _, index := range enclosing {
-			if assign, ok := index.(*ast.AssignStmt); ok {
-				for _, index := range assign.Lhs {
-					if index == ident {
-						enclosing2, _ := astutil.PathEnclosingInterval(r.File, index.Pos(), index.End())
-						for _, index2 := range enclosing2 {
-							if _, ok := index2.(*ast.SelectorExpr); ok {
-								return true
-							} else if index2 == assign {
-								break
-							}
-						}
-						return false
-					}
-				}
-				return true
-			}
-		}
-	} else*/if ident, ok := r.SelectedNode.(*ast.Ident); ok {
+if ident, ok := r.SelectedNode.(*ast.Ident); ok {
 		enclosing, _ := astutil.PathEnclosingInterval(r.File, ident.Pos(), ident.End())
 		for _, index := range enclosing {
 			if assign, ok := index.(*ast.AssignStmt); ok {
 				for _, index := range assign.Rhs {
-					/*if index == ident {
-						enclosing2, _ := astutil.PathEnclosingInterval(r.File, index.Pos(), index.End())
-						for _, index2 := range enclosing2 {
-							if _, ok := index2.(*ast.SelectorExpr); ok {
-								return true
-							} else if index2 == assign {
-								break
-							}
-						}
-						return false
-					} else*/if selector, ok := index.(*ast.SelectorExpr); ok {
+					if selector, ok := index.(*ast.SelectorExpr); ok {
 						if selector.Sel == ident || selector.X == ident {
 							return false
 						}
@@ -593,40 +438,25 @@ func (r *ExtractLocal) caseSelectorCheck(switchList []ast.Stmt) bool {
 
 // function needed to detect if a reserved word is trying to be extracted (a predeclared Ident)
 func (r *ExtractLocal) isPreDeclaredIdent() bool {
-	pos1 := r.posOff(r.SelectedNode)
-	pos2 := r.endOff(r.SelectedNode)
-	selectedNodeName := string(r.FileContents[int(pos1):int(pos2)])
-	result, _ := regexp.MatchString("^(bool|byte|complex64|complex128|error|float32|float64|int|int8|int16|int32|int64|rune|string|uint|uint8|uint16|uint32|uint64|uintptr|global|reflect)$", selectedNodeName)
+	result, _ := regexp.MatchString(
+		"^(bool|byte|complex64|complex128|error|float32|float64|int|int8|int16|int32|int64|rune|string|uint|uint8|uint16|uint32|uint64|uintptr|global|reflect)$", 
+							string(r.FileContents[int(r.Program.Fset.Position(r.SelectedNode.Pos()).Offset):int(r.Program.Fset.Position(r.SelectedNode.End()).Offset)]))
 	return result
 }
 
 // addForSwitch switch extract function
 func (r *ExtractLocal) addForSwitch(switchNode ast.Node, selectedNode ast.Node, newVar string) bool {
-	pos3 := r.posOff(switchNode)
-	r.Edits[r.Filename].Add(&text.Extent{pos3, 0}, newVar)
-	pos1 := r.posOff(selectedNode)
-	pos2 := r.endOff(selectedNode) - pos1
-	r.Edits[r.Filename].Add(&text.Extent{pos1, pos2}, r.varName)
+	r.Edits[r.Filename].Add(&text.Extent{r.Program.Fset.Position(switchNode.Pos()).Offset, 0}, newVar)
+	r.Edits[r.Filename].Add(&text.Extent{r.Program.Fset.Position(selectedNode.Pos()).Offset, 
+											r.Program.Fset.Position(selectedNode.End()).Offset - r.Program.Fset.Position(selectedNode.Pos()).Offset}, r.varName)
 	return true
 }
 
 // createVar create the new var to go into the coding
 func (r *ExtractLocal) createVar(selectedNode ast.Node) string {
-	pos1 := r.posOff(selectedNode)
-	pos2 := r.endOff(selectedNode)
-	newVar := r.varName + " := " + string(r.FileContents[int(pos1):int(pos2)]) + "\n"
-	return newVar
+	return  r.varName + " := " + string(r.FileContents[int(r.Program.Fset.Position(selectedNode.Pos()).Offset):
+															int(r.Program.Fset.Position(selectedNode.End()).Offset)]) + "\n"
 }
-
-/*// createVar2 create new var as var _
-  // just in case there is a extract that you have to do var a ___
-  // rather than a := ______ ___
-func (r *ExtractLocal) createVar2(selectedNode ast.Node) string {
-	pos1 := r.posOff(selectedNode)
-	pos2 := r.endOff(selectedNode)
-	newVar := "var " + r.varName + " " + string(r.FileContents[int(pos1):int(pos2)]) + "\n"
-	return newVar
-} */
 
 // createParent finds the parent of the selected node, and gives it to the
 // function that inputs the newVar into the file at the parent spot and
@@ -661,54 +491,8 @@ func (r *ExtractLocal) createParent(newVar string) bool {
 
 // addBeforeParent extract that puts the new var above the parent
 func (r *ExtractLocal) addBeforeParent(parentNode ast.Node, newVar string) bool {
-	off1 := r.posOff(parentNode)
-	off2 := r.posOff(r.SelectedNode)
-	off3 := r.endOff(r.SelectedNode) - off2
-	r.Edits[r.Filename].Add(&text.Extent{off1, 0}, newVar)
-	r.Edits[r.Filename].Add(&text.Extent{off2, off3}, r.varName)
+	r.Edits[r.Filename].Add(&text.Extent{r.Program.Fset.Position(parentNode.Pos()).Offset, 0}, newVar)
+	r.Edits[r.Filename].Add(&text.Extent{r.Program.Fset.Position(r.SelectedNode.Pos()).Offset,
+										 r.Program.Fset.Position(r.SelectedNode.End()).Offset - r.Program.Fset.Position(r.SelectedNode.Pos()).Offset}, r.varName)
 	return true
-}
-
-// errorCheck checks for any of the errors that were suppose to be thrown
-func (r *ExtractLocal) errorCheck(errorType string) {
-	if errorType != "" {
-		switch errorType {
-		case "typeSwitchCase":
-			r.Log.Error("You can't extract a type variable from a type switch statement or it's case statements.")
-		case "for":
-			r.Log.Error("You can't extract from a for loop's conditions (any part in the for statement).")
-		case "mulitAssign":
-			r.Log.Error("You can't extract from a multi-assign statement (ie: a, b := 0, 0).")
-		case "funcInput":
-			r.Log.Error("You can't extract from the function parameters/results/method input at the function definition or the whole function itself (for full function extraction use the extract refactoring).")
-		case "keyValue":
-			r.Log.Error("You can't extract the whole key/value from a key value expression (ie: key: value can't be newVar := key: value).")
-		case "assignStmt":
-			r.Log.Error("Extracting from a var stmt will alter the definition and should be avoided.")
-		case "lhsAssign":
-			r.Log.Error("You can't extract a variable from the lhs of an assignment statement.")
-		case "callExpr":
-			r.Log.Error("You can't extract this part of a 'call expr' (ie:  fmt.Println('____') can't extract the fmt or Println, or fmt.Println).")
-		case "ifMulti":
-			r.Log.Error("You can't extract from an if statement with an assign stmt in it")
-		case "blockSelected":
-			r.Log.Error("You can't select a block for extract local. Please use the extract refactoring when selecting blocks or functions.")
-		case "selectorType":
-			r.Log.Error("You can't extract the type from a selector expr (ie: case reflect.Float32:  can't extract Float32).")
-		case "nil":
-			r.Log.Error("You can't extract nil since nil isn't a type.")
-		case "switchKey":
-			r.Log.Error("Sorry, you can't extract the switch key or the case selector.")
-		case "branchStmt":
-			r.Log.Error("Sorry, you can't extract a goto, break, continue, or fallthrough statement")
-		case "labelStmt":
-			r.Log.Error("You can't create a variable for a lable.")
-		/*case "indexExpr":
-		r.Log.Error("You can't extract an index expr or the variable that has an index expr with it (ie mapping[beta.result] can't extract mapping or beta.result although you can extract the whole thing.)")*/
-		case "preIdent":
-			r.Log.Error("Sorry, you can't pull out a predetermined identifier like string or reflect and make a variable of that type (reflect.String can't be made newVar.String since it isn't type reflect)")
-		default:
-			r.Log.Error("found an unknown error.")
-		}
-	}
 }

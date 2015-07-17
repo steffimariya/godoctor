@@ -1,0 +1,16 @@
+package main
+
+import "fmt"
+
+func main() {
+	a := 5
+	b := 7
+	for {
+		newVar := a + b
+		c := newVar // <<<<< extractLocal,9,7,9,12,newVar,pass
+		fmt.Println("c is", c)
+		if c == 12 {
+			break
+		}
+	}
+}
