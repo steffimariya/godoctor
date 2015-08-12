@@ -7,7 +7,7 @@ func zeroval(ival int) {
 }
 
 func zeroptr(iptr *int) {
-	*iptr = 0 // <<<<< extractLocal,10,5,10,9,newVar,pass
+	*iptr = 0 // <<<<< extractLocal,10,5,10,9,newVar,fail
 }
 
 func main() {
